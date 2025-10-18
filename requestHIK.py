@@ -2,7 +2,7 @@ import requests
 import datetime
 import json
 import random
-
+from utils import random_string
 class RequestHIK:
     """"
     phai co: reqCode,podCode,indBind,positionCode \r\n
@@ -66,12 +66,7 @@ class HIKSERVER:
     def random_string(self,length=6):
         letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
         return ''.join(random.choice(letters) for i in range(length))
-# ip_address='192.168.5.1'
-# port='8181'
-# hikreq = RequestHIK(random_string(8), "fgdasfdsa", "sadfds", "0")
-# hikserver = HIKSERVER(ip_address=ip_address,port=port)
-# result = hikserver.bind_pod_and_berth(hikreq=hikreq)
-# if result is None:
-#     print("Failed to bind pod and berth.")
-# else:
-#     print( result.json()['message'])
+if result is None:
+    print("Failed to bind pod and berth.")
+else:
+    print( result.json()['message'])

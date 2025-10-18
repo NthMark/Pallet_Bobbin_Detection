@@ -13,7 +13,7 @@ import logging
 import sys
 import yaml
 from typing import Dict, List, Tuple, Optional, Union
-from requestHIK import HIKSERVER,RequestHIK
+from requestHIK_bin import HIKSERVER,RequestHIK
 from utils import random_string, resource_path
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -84,7 +84,7 @@ class CameraManager:
 class PolygonPropertiesDialog(QDialog):
     """Dialog for editing polygon properties"""
     
-    def __init__(self, parent=None, shape_name="", pod_code="", position_code=""):
+    def __init__(self, parent=None, shape_name="",ctnr_type="", ctnr_code="", position_code="",stg_bin="",bind=""):
         super().__init__(parent)
         self.setWindowTitle("Edit Polygon Properties")
         self.setModal(True)
@@ -97,16 +97,26 @@ class PolygonPropertiesDialog(QDialog):
         self.name_edit.setPlaceholderText("Enter shape name")
         layout.addRow("Name:", self.name_edit)
         
-        # Pod Code field
-        self.pod_code_edit = QLineEdit(pod_code)
-        self.pod_code_edit.setPlaceholderText("Enter pod code")
-        layout.addRow("Pod Code:", self.pod_code_edit)
+        # Container Code field
+        self.ctnr_type_edit = QLineEdit(ctnr_type)
+        self.ctnr_type_edit.setPlaceholderText("Enter container type")
+        layout.addRow("Container Type:", self.ctnr_type_edit)
         
+        self.ctnr_code_edit = QLineEdit(ctnr_code)
+        self.ctnr_code_edit.setPlaceholderText("Enter container code")
+        layout.addRow("Container Code:", self.ctnr_code_edit)
         # Position Code field
         self.position_code_edit = QLineEdit(position_code)
         self.position_code_edit.setPlaceholderText("Enter position code")
         layout.addRow("Position Code:", self.position_code_edit)
-        
+        #Storage Bin field
+        self.stg_bin_edit = QLineEdit(stg_bin)
+        self.stg_bin_edit.setPlaceholderText("Enter storage bin")
+        layout.addRow("Storage bin:", self.stg_bin_edit)
+        # Item available
+        self.bind_code_edit = QLineEdit(bind)
+        self.bind_code_edit.setPlaceholderText("Enter Bind Status")
+        layout.addRow("Bind:", self.bind_code_edit)
         # Buttons
         button_layout = QHBoxLayout()
         save_button = QPushButton("Save")
@@ -130,8 +140,11 @@ class PolygonPropertiesDialog(QDialog):
         """Get the values from the form"""
         return {
             'name': self.name_edit.text().strip(),
-            'podCode': self.pod_code_edit.text().strip(),
-            'positionCode': self.position_code_edit.text().strip()
+            'ctnrCod': self.ctnr_code_edit.text().strip(),
+            'positionCode': self.position_code_edit.text().strip(),
+            'ctnrType': self.ctnr_type_edit.text().strip(),
+            'bind':self.bind_code_edit.text().strip(),
+            'stgBin':self.stg_bin_edit.text().strip()
         }
 def _probe_process(url: str, result_queue: multiprocessing.Queue):
     """
@@ -161,7 +174,7 @@ def _probe_process(url: str, result_queue: multiprocessing.Queue):
 class StreamOpener(QObject):
     finished = pyqtSignal(str, bool, str)
 
-    def __init__(self, url: str, timeout_s: float = 10.0):
+    def __init__(self, url: str, timeout_s: float = 60.0):
         super().__init__()
         self.url       = url
         self.timeout_s = timeout_s
@@ -210,6 +223,8 @@ class ShapeStatus(Enum):
     WRONG_POSITIONCODE=auto()
     EMPTY_PODCODE=auto()
     EMPTY_POSITIONCODE=auto()
+    ALREADY_BINDED=auto()
+    FAILED=auto()
 class VideoDisplay(QWidget):
     """Enhanced video display widget with polygon drawing capabilities"""
     
@@ -461,9 +476,12 @@ class VideoDisplay(QWidget):
         # Create new shape
         self.polygons[self.current_url][shape_name] = {
             'points': self.points.copy(),
-            'podCode': '',
+            'ctnrType':'',
+            'ctnrCod': '',
             'positionCode': '',
-            'status':ShapeStatus.NO_INFORMATION.name
+            'stgBin':'',
+            'status':ShapeStatus.NO_INFORMATION.name,
+            'bind':"0"
         }
         
         self.current_shape_id += 1
@@ -540,8 +558,12 @@ class VideoDisplay(QWidget):
         dialog = PolygonPropertiesDialog(
             self,
             shape_name,
-            polygon_data.get('podCode', ''),
-            polygon_data.get('positionCode', '')
+            polygon_data.get('ctnrType',''),
+            polygon_data.get('ctnrCod', ''),
+            polygon_data.get('positionCode', ''),
+            polygon_data.get('stgBin', ''),
+            polygon_data.get('bind', ''),
+            
         )
         
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -563,41 +585,56 @@ class VideoDisplay(QWidget):
             # Remove old entry if name changed
             if new_name != shape_name:
                 del self.polygons[self.current_url][shape_name]
-            
-            # Create/update polygon entry
-            if values['podCode']=='' and values['positionCode']=='':
-                status=ShapeStatus.NO_INFORMATION.name
-            
-            hikreq = RequestHIK(random_string(8), values['podCode'], values['positionCode'], "0")
-            response = self.hikserver.bind_pod_and_berth(hikreq=hikreq)
+            #BKeep bind in all situations
+            hikreq = RequestHIK(random_string(8),values['ctnrType'], values['ctnrCod'], \
+                                values['positionCode'], values['bind'],stgBinCode=values['stgBin'])
+            response = self.hikserver.bind_ctnr_and_bin(hikreq=hikreq)
             result=response.json()
             print(result)
-            if result['code']=='0' or 'Berth already linked to rack' in result['message'] \
-            or 'Berth linked to selected rack not found' in result['message']:
+            if result['code']=='0':
                 status=ShapeStatus.SUCCESSFUL.name
-                self.update_status('Successful')
-            elif values['podCode']=='' and values['positionCode']=='':
+                self.update_status(f"Updated shape {new_name}: Successful")
+            elif values['ctnrCod']=='' and values['positionCode']=='' \
+                and values['ctnrType']=='' and values['stgBin']=='' and values['bind']=='':
                 status=ShapeStatus.NO_INFORMATION.name
-                self.update_status("No information filled")
+                self.update_status(f"Updated shape {new_name}: No information filled")
             else:
-                if 'Berth does not exist' in result['message']:
-                    status=ShapeStatus.WRONG_POSITIONCODE.name
-                elif 'Storage rack does not exist' in result['message']:
-                    status=ShapeStatus.WRONG_PODCODE.name
-                elif 'Rack serial number may not be empty' in result['message']:
-                    status=ShapeStatus.EMPTY_PODCODE.name
-                elif 'Berth name cannot be blank' in result['message']:
-                    status=ShapeStatus.EMPTY_POSITIONCODE.name
-                self.update_status(f"Updated shape: {new_name} "+result['message'])
+                status=ShapeStatus.FAILED.name
+                self.update_status(f"Updated shape {new_name}: "+result['message'])
             self.polygons[self.current_url][new_name] = {
                 'points': points,
-                'podCode': values['podCode'],
+                'ctnrType':values['ctnrType'],
+                'ctnrCod': values['ctnrCod'],
                 'positionCode': values['positionCode'],
-                'status': status
+                'stgBin': values['stgBin'],
+                'status': status,
+                'bind':values['bind']
             }
-            
             self.save_polygons()
             logger.info(f"Shape updated: {shape_name} -> {new_name}")
+            if not self.is_shape_valid(self.polygons[self.current_url][new_name]):
+                self.update_status(f"Shape {new_name} not valid — YOLO should be disabled for this camera.")
+    def is_shape_valid(self, polygon_data: dict) -> bool:
+        """
+        Kiểm tra 1 polygon_data có đầy đủ & status SUCCESSFUL hay không.
+        Trả về True nếu ok, False nếu thiếu.
+        """
+        try:
+            ctnrType = str(polygon_data.get('ctnrType','')).strip()
+            ctnrCod  = str(polygon_data.get('ctnrCod','')).strip()
+            position = str(polygon_data.get('positionCode','')).strip()
+            stgBin   = str(polygon_data.get('stgBin','')).strip()
+            status   = str(polygon_data.get('status','')).strip()
+            # Điều kiện chặt: status phải SUCCESSFUL và tất cả field không rỗng
+            if status != ShapeStatus.SUCCESSFUL.name:
+                return False
+            if not (ctnrType and ctnrCod and position and stgBin):
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"is_shape_valid error: {e}")
+            return False
+
     def _connect_spinners(self):
         self.connecting.connect(self._on_connecting_spinner)
         self.connection_result.connect(self._on_connection_spinner_result)
@@ -640,7 +677,7 @@ class VideoDisplay(QWidget):
         self.connection_result.emit(url,success,error_message)
 
         if success:
-            self.cap=cv2.VideoCapture(url)
+            self.cap=cv2.VideoCapture(url,cv2.CAP_FFMPEG)
             self.current_url=url
             self.timer.start(30)
             self.update_status(f"Connected to: {url}")
@@ -828,7 +865,7 @@ class VideoDisplay(QWidget):
         text_point = QPoint(min_x, max(min_y - 10, 15))
         
         # Format display text
-        pod_code = polygon_data.get('podCode', '')
+        pod_code = polygon_data.get('ctnrCod', '')
         position_code = polygon_data.get('positionCode', '')
         
         display_text = shape_name

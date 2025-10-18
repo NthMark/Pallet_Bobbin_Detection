@@ -15,6 +15,13 @@ import json
 import os
 import yaml
 from utils import resource_path
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"]=(
+    "rtsp_transport;tcp|"
+    "stimeout;20000000|"
+    "max_delay;1000000|"
+    "reorder_queue_size;0|"
+    "buffer_size;102400"
+)
 class ConfigLoader:
     @staticmethod
     def load_config(file_path=resource_path("config.yaml")):

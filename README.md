@@ -125,3 +125,24 @@ You can draw and edit these polygons in the application's GUI.
 
 ## License
 See [LICENSE](LICENSE) for details.
+
+pyinstaller --clean --noconfirm ^
+  --name "RTC-CCTV-Viewer" ^
+  --windowed ^
+  --icon rtc.png ^
+  --collect-all PyQt6 ^
+  --collect-all ultralytics ^
+  --collect-all torch ^
+  --collect-all torchvision ^
+  --copy-metadata ultralytics ^
+  --copy-metadata torch ^
+  --hidden-import multiprocessing.popen_spawn_posix ^
+  --hidden-import multiprocessing.popen_spawn_win32 ^
+  --add-data "config.yaml;." ^
+  --add-data "rtc.png;." ^
+  --add-data "spinner.gif;." ^
+  --add-data "camera_configs.json;." ^
+  --add-data "model/yolov5s.pt;model" ^
+  --add-data "yolov5su.pt;." ^
+  --add-data "yolo11n.pt;." ^
+  main.py

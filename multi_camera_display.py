@@ -15,12 +15,15 @@ from typing import Dict, List
 import gc
 import sys
 import datetime
-from requestHIK import HIKSERVER, RequestHIK
+import logging
+from requestHIK_bin import HIKSERVER, RequestHIK
 
 NUMBER_OF_CAMERA=4
 MAX_ROWS=2
 MAX_COLUMNS=2
-
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 import yaml
 # Load camera configurations from YAML file
@@ -57,6 +60,10 @@ class CameraThread(QThread):
         self.skip_frames=10
         self.frame_count=0
         self.last_shape_states = {}  # Store last detection results
+        self.no_empty_states={}
+        if self.url in self.polygons:
+            for shape_name in self.polygons[self.url].keys():
+                self.no_empty_states[shape_name] = 0
     def dispose(self):
         """Cleanup resources properly"""
         self.running = False
@@ -95,7 +102,7 @@ class CameraThread(QThread):
 
     def run(self):
         # try:
-            self.cap = cv2.VideoCapture(self.url)
+            self.cap = cv2.VideoCapture(self.url,cv2.CAP_FFMPEG)
             print(f"Started camera thread for {self.url}")
             
             while self.running and self.cap and self.cap.isOpened():
@@ -120,14 +127,17 @@ class CameraThread(QThread):
                         self.model.fuse()
                     if self.model and self.running:
                         results = self.model(frame, verbose=False)[0]
-
                         h, w = frame.shape[:2]
+                        # no_bobbin=0
+                        # confidences=[]
                         for r in results.boxes.data:
                             if not self.running:
                                 break
 
                             x1, y1, x2, y2, score, class_id = r
-                            if class_id == self.class_id:  # Person class
+                            # confidences.append((score.item(),class_id)) 
+                            if class_id == self.class_id:  # Bobbin class or Pallet class
+                                # no_bobbin+=1
                                 if self.url in self.polygons:
                                     for shape_name, points in self.polygons[self.url].items():
                                         abs_points = [(int(x * w), int(y * h)) for x, y in points['points']]
@@ -135,9 +145,10 @@ class CameraThread(QThread):
                                         person_center = ((int(x1) + int(x2)) // 2, (int(y1) + int(y2)) // 2)
                                         if cv2.pointPolygonTest(polygon, person_center, False) >= 0:
                                             shape_states[shape_name] = 1
+                                        
 
                                 cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (255, 0, 0), 2)
-                    
+                        # print(f"Number of bobbin: {no_bobbin} with probs {confidences}")
                     # Store the detection results for use in skipped frames
                     self.last_shape_states = shape_states.copy()
                     
@@ -176,6 +187,8 @@ class CameraWidget(QWidget):
         self.yolo_enabled = False  # Default YOLO state
         self.have_camera=have_camera
         self.previous_states = {}  # Track previous states for change detection
+        self.no_empty_state_thresh=100
+        self.is_start=True
         self.init_ui()
         if have_camera:
             self.start_camera()
@@ -225,29 +238,107 @@ class CameraWidget(QWidget):
             self.layout.addWidget(self.status_label)
     def camera_not_connected(self):
         self.status_label.setText("No camera")
+    def is_polygon_info_valid(self) -> bool:
+        """
+        Kiểm tra tất cả polygon của camera này có thông tin đầy đủ và 'status' = SUCCESSFUL hay không.
+        Trả về True nếu OK, False nếu có polygon chưa đầy đủ hoặc status không phải SUCCESSFUL.
+        """
+        try:
+            if self.url not in self.polygons:
+                # Nếu không có polygon nào thì coi là chưa có thông tin
+                return False
+            for shape_name, pdata in self.polygons[self.url].items():
+                # Kiểm tra các trường quan trọng
+                ctnrType = str(pdata.get('ctnrType', '')).strip()
+                ctnrCod  = str(pdata.get('ctnrCod', '')).strip()
+                position = str(pdata.get('positionCode', '')).strip()
+                stgBin   = str(pdata.get('stgBin', '')).strip()
+                status   = str(pdata.get('status', '')).strip()
+                # Nếu muốn chỉ chấp nhận status SUCCESSFUL, kiểm tra status
+                if status != "SUCCESSFUL":
+                    return False
+                # Nếu bạn muốn chấp nhận khi có thông tin ở 2/3 trường, chỉnh logic ở đây.
+                if not (ctnrType and ctnrCod and position and stgBin):
+                    return False
+            return True
+        except Exception as e:
+            print(f"is_polygon_info_valid error: {e}")
+            return False
     def toggle_yolo(self, state):
         """Toggle YOLO detection on/off"""
         self.yolo_enabled = bool(state)
         # Update the state of the camera thread
         if self.camera_thread:
             self.camera_thread.yolo_enabled = self.yolo_enabled
+    def toggle_yolo(self, state):
+        """Toggle YOLO detection on/off with validation of polygon info."""
+        requested = bool(state)
+        # Nếu user bật YOLO, kiểm tra thông tin polygon trước
+        if requested:
+            valid = self.is_polygon_info_valid()
+            if not valid:
+                # Vô hiệu hoá checkbox, báo user
+                self.yolo_checkbox.setChecked(False)
+                self.yolo_checkbox.setEnabled(False)  # disable until user fixes info
+                self.update_status("YOLO disabled: Polygon info incomplete or incorrect. Please fix shapes first.")
+                
+                # OPTIONAL: hiển thị cảnh báo bật cửa sổ (nếu GUI hỗ trợ)
+                try:
+                    from PyQt6.QtWidgets import QMessageBox
+                    QMessageBox.warning(self, "YOLO Disabled", "Thông tin polygon chưa đầy đủ/không chính xác. YOLO bị tắt.")
+                except Exception:
+                    pass
+
+                # --- CRASH OPTION (KHÔNG KHUYẾN NGHỊ) ---
+                # Nếu bạn muốn chương trình dừng ngay lập tức (crash), bỏ comment hai dòng dưới.
+                # import os
+                # os._exit(1)
+
+                return
+
+        # Nếu qua được kiểm tra hoặc đang tắt, cập nhật trạng thái
+        self.yolo_enabled = requested
+        if self.camera_thread:
+            self.camera_thread.yolo_enabled = self.yolo_enabled
+
+        # Nếu checkbox trước đó bị disabled do lỗi, cho phép bật lại nếu valid
+        if not self.yolo_checkbox.isEnabled():
+            # Bật lại nếu khi kiểm tra bây giờ đã OK
+            if self.is_polygon_info_valid():
+                self.yolo_checkbox.setEnabled(True)
 
     def start_camera(self):
         self.camera_thread = CameraThread(self.camera_config, self.polygons)
         self.camera_thread.frame_ready.connect(self.update_frame)
         self.camera_thread.start()
-
+    def get_containner_code(self,hikserver : HIKSERVER,ctnrTyp, positionCode, indBind,stgBinCode,ctnr_id_outer="5"):
+        hikreq = RequestHIK(hikserver.random_string(8), ctnrTyp,ctnr_id_outer,positionCode,indBind,stgBinCode=stgBinCode)
+        result = hikserver.bind_ctnr_and_bin(hikreq=hikreq)
+        if result is None:
+            print("Failed to bind pod and Container Code.")
+            return None
+        else:
+            return result.json()['message'][-1:]
+    def warn(self, msg: str):
+        """Send a warning to the camera's status label + log (non-fatal)."""
+        try:
+            if hasattr(self, "status_label"):
+                self.status_label.setText(f"⚠️ {msg}")
+            logger.warning(msg)
+            print(f"[WARN] {msg}")
+        except Exception:
+            pass
     def on_state_changed(self, camera_url: str, shape_name: str, old_state: int, new_state: int):
         """Xử lý khi có thay đổi state"""
         if camera_url == self.url:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             state_text = "DETECTED" if new_state == 1 else "CLEAR"
             old_state_text = "DETECTED" if old_state == 1 else "CLEAR"
-            
+            self.polygons[self.url][shape_name]["bind"]=str(new_state)
             # In thông báo ra console
             print(f"[{timestamp}] CAMERA: {camera_url} | ZONE: {shape_name} | CHANGED: {old_state_text} → {state_text}")
             
-            # Gửi yêu cầu đến HIKSERVER,  podCode, indBing, positionCode lấy trong file camera_polygons.json theo shape_name
+            # Gửi yêu cầu đến HIKSERVER,  ctnrCod, indBing, positionCode lấy trong file camera_polygons.json theo shape_name
             if self.url not in self.polygons or shape_name not in self.polygons[self.url]:
                 print(f"Polygon for {shape_name} not found in {self.url}")
                 return
@@ -255,29 +346,60 @@ class CameraWidget(QWidget):
             if not camera_url:
                 print(f"Camera URL is empty for {shape_name} in {self.url}")
                 return
+            indBind='1' if state_text == "DETECTED" else '0'
+            if indBind=='1':
+                camera_polygon['ctnrCod']=self.get_containner_code(hikserver,camera_polygon['ctnrType'],camera_polygon['positionCode'],indBind,camera_polygon['stgBin'])
+                self.polygons[self.url][shape_name]['ctnrCod']=camera_polygon['ctnrCod']
             # Tạo yêu cầu HIKSERVE
             print(state_text)
-            hikreq = RequestHIK(reqCode=hikserver.random_string(8),
-                               podCode=camera_polygon['podCode'],
-                               indBind='1' if state_text == "DETECTED" else '0',
-                               positionCode=camera_polygon['positionCode'],
+            hikreq = RequestHIK(hikserver.random_string(8),
+                                camera_polygon['ctnrType'],
+                               camera_polygon['ctnrCod'],
+                               camera_polygon['positionCode'],
+                               indBind,
+                               stgBinCode=camera_polygon['stgBin']
             )
+            if indBind=="0":
+                self.polygons[self.url][shape_name]['ctnrCod']=''
+            self.save_polygons()
             # Gửi yêu cầu đến HIKSERVER
-            response = hikserver.bind_pod_and_berth(hikreq=hikreq)
+            response = hikserver.bind_ctnr_and_bin(hikreq=hikreq)
+            try:
+                response = hikserver.bind_ctnr_and_bin(hikreq=hikreq)
+            except Exception as e:
+                self.warn(f"{shape_name}: requestHik raised exception: {e}")
+                self.save_polygons()
+                return
+            if response is None:
+                self.warn(f"{shape_name}: requestHik returned None (network/server?).")
+
             if response is not None:
                 if response.status_code == 200:
-                    print(f"Request successful: {response.json()}")
+                    print(f"Request successful ({camera_polygon['ctnrCod']},{camera_polygon['positionCode']}): {response.json()}")
                 else:
-                    print(f"Request failed with status code {response.status_code}: {response.text}")
+                    print(f"Request failed ({camera_polygon['ctnrCod']},{camera_polygon['positionCode']}) with status code {response.status_code}: {response.text}")
 
-
+    def check_changed_state(self,previous_state,current_state,shape_name):
+        if current_state ==0 :
+            if previous_state==1 and self.camera_thread.no_empty_states[shape_name] <self.no_empty_state_thresh:
+                self.camera_thread.no_empty_states[shape_name]+=1
+                return 1
+            return 0
+        else:
+            self.camera_thread.no_empty_states[shape_name]=0
+            return 1
+            
     def update_frame(self, url: str, frame: np.ndarray, shape_states: dict):
         if url != self.url:
             return
-
+        if self.is_start:
+            print(self.previous_states)
+            self.is_start=False
         # Check for state changes and call on_state_changed
         for shape_name, current_state in shape_states.items():
             previous_state = self.previous_states.get(shape_name, 0)
+            current_state=self.check_changed_state(previous_state,current_state,shape_name)
+            shape_states[shape_name]=current_state
             if current_state != previous_state:
                 # print(f"on_state_changed {url}-{shape_name}-{previous_state}-{current_state}")
                 self.on_state_changed(url, shape_name, previous_state, current_state)
@@ -340,7 +462,14 @@ class CameraWidget(QWidget):
             Qt.TransformationMode.SmoothTransformation
         )
         self.video_label.setPixmap(scaled_pixmap)
-
+    def save_polygons(self):
+        """Save polygons to JSON file"""
+        try:
+            with open('camera_polygons.json', 'w') as f:
+                json.dump(self.polygons, f, indent=2)
+            logger.info("Polygons saved successfully")
+        except Exception as e:
+            logger.error(f"Error saving polygons: {e}")
 class MultiCameraDisplay(QWidget):
     def __init__(self, camera_configs: List[dict], parent=None):
         super().__init__(parent)
