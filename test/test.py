@@ -1,43 +1,63 @@
-# from PyQt6.QtWidgets import QApplication, QWidget, QPushButton, QMessageBox, QVBoxLayout
-# import sys
+# leak_test_show.py
+import cv2
+import time
+from collections import deque
 
-# class MainWindown(QWidget):
-#     def __init__(self):
-#         super().__init__()
+# Choose your leak mode
+#  "list"  -> keeps all frames (RAM explodes very fast)
+#  "queue" -> keeps last N frames (safe)
+MODE = "list"   # change to "queue" for controlled version
+MAX_KEEP = 50   # only used when MODE="queue"
 
-#         self.setWindowTitle("RTC")
-#         self.setGeometry(100, 100, 300, 150)
-         
-#         self.button = QPushButton("click me")
-#         self.button.clicked.connect(self.on_click)
-
-#         layout = QVBoxLayout()
-#         layout.addWidget(self.button)
-#         self.setLayout(layout)
-
-#     def on_click(self):
-#         QMessageBox.information(self, "hello", "clicked button")
-# if __name__ == "__main__":
-#     app = QApplication(sys.argv)
-#     windown = MainWindown()
-#     windown.show()
-#     sys.exit(app.exec())
-
-import cv2 
-
-rtsp = "rtsp://admin:RTC@1122@172.24.24.201:554/Streaming/Channels/101"
-cap = cv2.VideoCapture(rtsp)
+cap = cv2.VideoCapture(0)
 if not cap.isOpened():
-    print("false")
-    exit()
+    raise RuntimeError("Cannot open camera!")
+
+print("Press 'q' to quit.")
+frames = []       # for list mode
+queue  = deque()  # for queue mode
+frame_count = 0
+start_time = time.time()
+
 while True:
-    ret, frame = cap.read()
-    if not ret:
-        print("false to grab frame")
+    ok, frame = cap.read()
+    if not ok:
         break
-    cv2.imshow("RTSP", frame)
-    if cv2.waitKey(1)&0xff == ord('q'):
+    frame_count += 1
+
+    # -- 1) Cause memory growth ----------------------------------------------
+    if MODE == "list":
+        frames.append(frame)           # ❌ keeps every frame forever
+    elif MODE == "queue":
+        queue.append(frame)
+        if len(queue) > MAX_KEEP:
+            queue.popleft()            # ✅ keep only latest N frames
+
+    # -- 2) Display -----------------------------------------------------------
+    cv2.putText(frame, f"Frame: {frame_count}", (30,50),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,0), 2)
+    cv2.imshow("Leak test", frame)
+
+    # -- 3) Break condition ---------------------------------------------------
+    if cv2.waitKey(1) & 0xFF == ord('q'):
         break
+
+    # -- Optional: show FPS every 100 frames ---------------------------------
+    if frame_count % 100 == 0:
+        elapsed = time.time() - start_time
+        print(f"{frame_count} frames in {elapsed:.1f}s "
+              f"({frame_count/elapsed:.1f} FPS)")
 
 cap.release()
 cv2.destroyAllWindows()
+# main.py
+import sys
+from PyQt6 import QtWidgets
+
+if __name__ == "__main__":
+    app = QtWidgets.QApplication(sys.argv)
+    w = QtWidgets.QWidget()
+    w.setWindowTitle("Hello")
+    w.resize(300, 120)
+    w.show()
+    sys.exit(app.exec())
