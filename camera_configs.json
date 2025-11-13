@@ -1,0 +1,22 @@
+[
+  {
+    "camera_url": "0",
+    "model_path": "C:/Users/agv.project/Documents/Management_pallets_yolov/train19/weights/best.pt",
+    "id_class": "1"
+  },
+  {
+    "camera_url": "0",
+    "model_path": "C:/Users/agv.project/Documents/Management_pallets_yolov/train19/weights/best.pt",
+    "id_class": "1"
+  },
+  {
+    "camera_url": "0",
+    "model_path": "C:/Users/agv.project/Documents/Management_pallets_yolov/train19/weights/best.pt",
+    "id_class": "1"
+  },
+  {
+    "camera_url": "0",
+    "model_path": "C:/Users/agv.project/Documents/Management_pallets_yolov/train19/weights/best.pt",
+    "id_class": "1"
+  }
+]

@@ -14,10 +14,11 @@ import sys
 import yaml
 from typing import Dict, List, Tuple, Optional, Union
 from requestHIK_bin import HIKSERVER,RequestHIK
-from utils import random_string, resource_path
+from logger_config import get_logger
+from utils import random_string, resource_path,ensure_user_file,user_config_path
+import utils
 # Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 class ConfigLoader:
     @staticmethod
@@ -29,7 +30,7 @@ class ConfigLoader:
             with open(file_path, 'r') as f:
                 return yaml.safe_load(f)
         except Exception as e:
-            logger.error(f"Failed to load config: {e}")
+            logger.exception(f"Failed to load config: {e}")
             return {"rtc": {"ip_address": "192.168.5.16", "port": "8181"}}
 
 class CameraManager:
@@ -40,8 +41,11 @@ class CameraManager:
     def load_cameras_from_config(self, config_path="camera_configs.json"):
         """Load cameras from configuration file"""
         try:
-            with open(config_path, 'r') as f:
+            path=ensure_user_file(config_path)
+            with path.open('r',encoding="utf-8") as f:
                 configs = json.load(f)
+            # with open(resource_path(config_path), 'r') as f:
+            #     configs = json.load(f)
             
             self.cameras = []
             for config in configs:
@@ -52,7 +56,7 @@ class CameraManager:
             logger.info(f"Loaded {len(self.cameras)} cameras from config: {self.cameras}")
             return True
         except Exception as e:
-            logger.error(f"Failed to load camera configs: {e}")
+            logger.exception(f"Failed to load camera configs: {e}")
             return False
 
     def add_camera(self, url):
@@ -68,7 +72,7 @@ class CameraManager:
 
     def next_camera(self):
         """Switch to next camera"""
-        print(self.cameras, self.current_camera_index)
+        logger.info(self.cameras, self.current_camera_index)
         if self.cameras and self.current_camera_index < len(self.cameras) - 1:
             self.current_camera_index += 1
             return True
@@ -135,7 +139,14 @@ class PolygonPropertiesDialog(QDialog):
         # Focus on name field
         self.name_edit.setFocus()
         self.name_edit.selectAll()
-
+        main_win=self.parent()
+        dev_enabled=getattr(main_win,"developer_mode",False) if main_win else False
+        for widget in [self.ctnr_code_edit,self.bind_code_edit,self.name_edit]:
+            widget.setDisabled(not dev_enabled)
+            if not dev_enabled:
+                widget.setStyleSheet("background-color: #f0f0f0;color:gray;")
+            else:
+                widget.setStyleSheet("")
     def get_values(self) -> Dict[str, str]:
         """Get the values from the form"""
         return {
@@ -154,7 +165,7 @@ def _probe_process(url: str, result_queue: multiprocessing.Queue):
     cap = cv2.VideoCapture()
     try:
         # Force FFMPEG backend
-        if not cap.open(url, cv2.CAP_FFMPEG):
+        if not cap.open(url,cv2.CAP_FFMPEG):
             result_queue.put(("error", "could not open stream"))
             return
 
@@ -224,6 +235,7 @@ class ShapeStatus(Enum):
     EMPTY_PODCODE=auto()
     EMPTY_POSITIONCODE=auto()
     ALREADY_BINDED=auto()
+    NOT_BINDED=auto()
     FAILED=auto()
 class VideoDisplay(QWidget):
     """Enhanced video display widget with polygon drawing capabilities"""
@@ -247,7 +259,7 @@ class VideoDisplay(QWidget):
         self.camera_manager = CameraManager()
         if not self.camera_manager.load_cameras_from_config():
             # Fallback to default camera if config loading fails
-            logger.warning("Failed to load camera configs, using default camera")
+            logger.info("Failed to load camera configs, using default camera")
             self.camera_manager.add_camera("rtsp://admin:RTC@1122@172.24.24.201:554/Streaming/Channels/101")
         
         # Get HIK server IP and port from config.yaml
@@ -277,11 +289,12 @@ class VideoDisplay(QWidget):
         # Initialize HIK server
         self.hikserver = HIKSERVER(ip_address=self.ip_address, port=self.port)
         self.connect = True
-        
+        self.dev_mode=dict()
         # Initialize UI and load saved data
         self.init_ui()
         self._connect_spinners()
         self.load_polygons()
+        self.init_shape_info()
         logger.info(f"VideoDisplay widget initialized with {len(self.camera_manager.cameras)} cameras")
     def on_hik_error(self, msg: str):
         QMessageBox.critical(self, "HIK Server Error", msg)
@@ -292,7 +305,6 @@ class VideoDisplay(QWidget):
     def init_ui(self):
         """Initialize the user interface"""
         self.layout = QVBoxLayout(self)
-        
         # Create video display label
         self.video_label = QLabel()
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -333,7 +345,7 @@ class VideoDisplay(QWidget):
         self.spinner_label.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.spinner_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.spinner_movie=QMovie("spinner.gif")
+        self.spinner_movie=QMovie(resource_path("spinner.gif"))
         self.spinner_label.setMovie(self.spinner_movie)
         self.spinner_label.hide()
         # Create status bar
@@ -472,11 +484,22 @@ class VideoDisplay(QWidget):
         # Initialize dictionary for current URL if it doesn't exist
         if self.current_url not in self.polygons:
             self.polygons[self.current_url] = {}
-
+        ctnrtype=None
+        if '172.24.24.202' in self.current_url:
+            ctnrtype='2'
+        else:
+            ctnrtype='1'
+        if ctnrtype is None:
+            try:
+                QMessageBox.warning(self,"Wrong url",
+                                        "Check url!")
+            except Exception:
+                pass
+            return
         # Create new shape
         self.polygons[self.current_url][shape_name] = {
             'points': self.points.copy(),
-            'ctnrType':'',
+            'ctnrType':ctnrtype,
             'ctnrCod': '',
             'positionCode': '',
             'stgBin':'',
@@ -500,7 +523,7 @@ class VideoDisplay(QWidget):
             return
         shape_names=list(self.polygons[self.current_url].keys())
         shape_names=[int(x[len("shape_"):]) for x in shape_names]
-        # print(shape_names)
+        # logger.info(shape_names)
         max_shape_id=max(shape_names)
         for i in range(max_shape_id+1):
             if i not in shape_names:
@@ -548,13 +571,75 @@ class VideoDisplay(QWidget):
             status_text = f"Mouse: ({mouse_pos.x()}, {mouse_pos.y()}) "
             status_text += f"Normalized: ({current_coords[0]:.3f}, {current_coords[1]:.3f})"
             self.update_status(status_text)
-    
+    # Initialize current container code and bind status at start-up
+    def init_shape_info(self):
+        for url in self.polygons.keys():
+            for shape in self.polygons[url].keys():
+                if self.polygons[url][shape]["status"]==ShapeStatus.SUCCESSFUL.name:
+                    shape_info=self.polygons[url][shape]
+                    print(f"url {url} with {shape_info['stgBin']}")
+                    shape_ctnr_code_bind=self.get_info_shape_ctnrcode_bind(shape_info["ctnrType"],
+                                                      shape_info["positionCode"],
+                                                      shape_info["stgBin"])
+                    logger.info(f"Get shape {shape_ctnr_code_bind}")
+                    if shape_ctnr_code_bind is not None and shape_ctnr_code_bind[1]!='':
+                        self.polygons[url][shape]["ctnrCod"]=shape_ctnr_code_bind[0]
+                        self.polygons[url][shape]["bind"]=shape_ctnr_code_bind[1]
+        self.save_polygons()
+    #Automatically get container code and bind status
+    def get_info_shape_ctnrcode_bind(self,ctnrType,positionCode,stgBin,ctnrCod=utils.CONTAINER_CODE_OUTSIDE):
+        hikreq = RequestHIK(random_string(8),ctnrType, ctnrCod, \
+                                positionCode, '1',stgBinCode=stgBin)
+        try:
+            result = self.hikserver.bind_ctnr_and_bin(hikreq=hikreq)
+            if result is not None:
+                    if result.status_code == 200:
+                        logger.info(f"Request successful")
+                    else:
+                        logger.error(f"Request failed")
+        except Exception as e:
+            logger.warning(f"Request raised exception: {e}")
+            return None
+        print(result.json())
+        if result.json()["code"]=='0':
+            hikreq = RequestHIK(random_string(8),ctnrType, ctnrCod, \
+                                positionCode, '0',stgBinCode=stgBin)
+            response = self.hikserver.bind_ctnr_and_bin(hikreq=hikreq)
+            if response is not None:
+                    if response.status_code == 200:
+                        logger.info(f"Request successful")
+                    else:
+                        logger.error(f"Request failed")
+            return ('','0')
+        elif 'has bind container code' in result.json()['message']:
+            return (result.json()['message'][-1:],'1')
+        else:
+            return ('','')
     def edit_shape_properties(self, shape_name: str):
         """Edit properties of a shape"""
+        try: 
+            self.load_polygons()
+        except Exception as e:
+            logger.exception(f"Fail to load polygon")
         if self.current_url not in self.polygons or shape_name not in self.polygons[self.current_url]:
+            logger.exception(f"Fail to get information to load")
+            return
+        ctnrtype=None
+        if '172.24.24.202' in self.current_url:
+            ctnrtype='2'
+        else:
+            ctnrtype='1'
+        if ctnrtype is None:
+            try:
+                QMessageBox.warning(self,"Wrong url",
+                                        "Check url!")
+            except Exception:
+                pass
             return
         status=None
         polygon_data = self.polygons[self.current_url][shape_name]
+        if self.polygons[self.current_url][shape_name]['ctnrType'] !=ctnrtype:
+            self.polygons[self.current_url][shape_name]['ctnrType']=ctnrtype
         dialog = PolygonPropertiesDialog(
             self,
             shape_name,
@@ -586,21 +671,35 @@ class VideoDisplay(QWidget):
             if new_name != shape_name:
                 del self.polygons[self.current_url][shape_name]
             #BKeep bind in all situations
-            hikreq = RequestHIK(random_string(8),values['ctnrType'], values['ctnrCod'], \
-                                values['positionCode'], values['bind'],stgBinCode=values['stgBin'])
-            response = self.hikserver.bind_ctnr_and_bin(hikreq=hikreq)
-            result=response.json()
-            print(result)
-            if result['code']=='0':
-                status=ShapeStatus.SUCCESSFUL.name
-                self.update_status(f"Updated shape {new_name}: Successful")
-            elif values['ctnrCod']=='' and values['positionCode']=='' \
-                and values['ctnrType']=='' and values['stgBin']=='' and values['bind']=='':
+            # hikreq = RequestHIK(random_string(8),values['ctnrType'], values['ctnrCod'], \
+            #                     values['positionCode'], values['bind'],stgBinCode=values['stgBin'])
+            # response = self.hikserver.bind_ctnr_and_bin(hikreq=hikreq)
+            # result=response.json()
+            # logger.info(result)
+            is_successful=False
+            if values['ctnrType'] and values['positionCode'] and values['stgBin']:
+                info=self.get_info_shape_ctnrcode_bind(values['ctnrType'],values['positionCode'],values['stgBin'])
+                if info is not None and info[1] != '':
+                    values['ctnrCod']=info[0]
+                    values['bind']=info[1]
+                    status=ShapeStatus.SUCCESSFUL.name
+                    logger.info(f"Updated shape {new_name}: Successful")
+                    self.update_status(f"Updated shape {new_name}: Successful")
+                    is_successful=True
+            # if (values['ctnrType'] and values['positionCode'] and values['bind']=='1' and values['stgBin'] and values['ctnrCod']) or \
+            # (values['ctnrType'] and values['positionCode'] and values['bind']=='0' and values['stgBin'] and values['ctnrCod']==''):
+            #     if values['bind']=='1' and values['ctnrCod']:
+            #         info=self.get_info_shape_ctnrcode_bind(values['ctnrType'],values['positionCode'],values['stgBin'])
+            #         if info is not None:
+            #             if info[1]=='1':
+            #                 if info[0] != 
+            #     status=ShapeStatus.SUCCESSFUL.name
+            #     logger.info(f"Updated shape {new_name}: Successful")
+            #     self.update_status(f"Updated shape {new_name}: Successful")
+            if not is_successful:
                 status=ShapeStatus.NO_INFORMATION.name
-                self.update_status(f"Updated shape {new_name}: No information filled")
-            else:
-                status=ShapeStatus.FAILED.name
-                self.update_status(f"Updated shape {new_name}: "+result['message'])
+                logger.info(f"Updated shape {new_name}: No information filled")
+                self.update_status(f"Updated shape {new_name}: No information filled")     
             self.polygons[self.current_url][new_name] = {
                 'points': points,
                 'ctnrType':values['ctnrType'],
@@ -612,29 +711,6 @@ class VideoDisplay(QWidget):
             }
             self.save_polygons()
             logger.info(f"Shape updated: {shape_name} -> {new_name}")
-            if not self.is_shape_valid(self.polygons[self.current_url][new_name]):
-                self.update_status(f"Shape {new_name} not valid — YOLO should be disabled for this camera.")
-    def is_shape_valid(self, polygon_data: dict) -> bool:
-        """
-        Kiểm tra 1 polygon_data có đầy đủ & status SUCCESSFUL hay không.
-        Trả về True nếu ok, False nếu thiếu.
-        """
-        try:
-            ctnrType = str(polygon_data.get('ctnrType','')).strip()
-            ctnrCod  = str(polygon_data.get('ctnrCod','')).strip()
-            position = str(polygon_data.get('positionCode','')).strip()
-            stgBin   = str(polygon_data.get('stgBin','')).strip()
-            status   = str(polygon_data.get('status','')).strip()
-            # Điều kiện chặt: status phải SUCCESSFUL và tất cả field không rỗng
-            if status != ShapeStatus.SUCCESSFUL.name:
-                return False
-            if not (ctnrType and ctnrCod and position and stgBin):
-                return False
-            return True
-        except Exception as e:
-            logger.error(f"is_shape_valid error: {e}")
-            return False
-
     def _connect_spinners(self):
         self.connecting.connect(self._on_connecting_spinner)
         self.connection_result.connect(self._on_connection_spinner_result)
@@ -650,7 +726,7 @@ class VideoDisplay(QWidget):
         self.spinner_label.resize(self.video_label.size())
     def set_source(self, url: str) -> None:
         if getattr(self, '_opener_thread', None):
-            # print("thread existed")
+            # logger.info("thread existed")
             self.cleanup_thread()
 
         self.cleanup_capture()
@@ -682,7 +758,7 @@ class VideoDisplay(QWidget):
             self.timer.start(30)
             self.update_status(f"Connected to: {url}")
         else:
-            # print("I get error ")
+            # logger.info("I get error ")
             self.video_label.setText(f"Error: {error_message}\nURL: {url}")
             self.current_url=None
             self.update_status("Connection failed")
@@ -725,7 +801,7 @@ class VideoDisplay(QWidget):
             
             # Convert to QImage
             bytes_per_line = ch * w
-            qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+            qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
             
             # Create pixmap and draw overlays
             pixmap = QPixmap.fromImage(qt_image)
@@ -735,13 +811,13 @@ class VideoDisplay(QWidget):
             scaled_pixmap = pixmap.scaled(
                 self.video_label.size(),
                 Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
+                Qt.TransformationMode.FastTransformation
             )
             
             self.video_label.setPixmap(scaled_pixmap)
             
         except Exception as e:
-            logger.error(f"Error updating frame: {e}")
+            logger.exception(f"Error updating frame: {e}")
     
     def draw_overlays(self, pixmap: QPixmap):
         """Draw polygon overlays on the video frame"""
@@ -752,13 +828,13 @@ class VideoDisplay(QWidget):
             # Draw saved polygons
             if self.current_url in self.polygons:
                 for shape_name, polygon_data in self.polygons[self.current_url].items():
-                    color = QColor(0, 255, 0) if shape_name == self.selected_shape else QColor(255, 0, 0)
+                    color = QColor(125, 0, 200) if shape_name == self.selected_shape else QColor(255, 125, 125)
                     self.draw_polygon(painter, polygon_data, color, shape_name)
             
             # Draw polygon being created
             if self.drawing_mode and self.points:
                 temp_data = {'points': self.points}
-                self.draw_polygon(painter, temp_data, QColor(255, 255, 0))
+                self.draw_polygon(painter, temp_data, QColor(125, 236, 0))
             
             # Draw rectangle preview
             if self.drawing_mode and self.draw_rectangle_mode and self.start_point and self.current_video_coords:
@@ -768,7 +844,7 @@ class VideoDisplay(QWidget):
             self.draw_coordinate_info(painter, pixmap.size())
             
         except Exception as e:
-            logger.error(f"Error drawing overlays: {e}")
+            logger.exception(f"Error drawing overlays: {e}")
         finally:
             painter.end()
     
@@ -996,25 +1072,34 @@ class VideoDisplay(QWidget):
     def save_polygons(self):
         """Save polygons to JSON file"""
         try:
-            with open('camera_polygons.json', 'w') as f:
-                json.dump(self.polygons, f, indent=2)
+            path=user_config_path('camera_polygons.json')
+            tmp=path.with_suffix(".json.tmp")
+            with tmp.open('w',encoding="utf-8") as f:
+                json.dump(self.polygons, f, ensure_ascii=False,indent=2)
+            tmp.replace(path)
+            # with open(resource_path('camera_polygons.json'), 'w') as f:
+            #     json.dump(self.polygons, f, indent=2)
             logger.info("Polygons saved successfully")
         except Exception as e:
-            logger.error(f"Error saving polygons: {e}")
+            logger.exception(f"Error saving polygons: {e}")
             QMessageBox.critical(self, "Error", f"Failed to save polygons: {str(e)}")
     
     def load_polygons(self):
         """Load polygons from JSON file"""
         try:
-            if os.path.exists('camera_polygons.json'):
-                with open('camera_polygons.json', 'r') as f:
+            if os.path.exists(resource_path('camera_polygons.json')):
+                path=ensure_user_file('camera_polygons.json')
+                with path.open('r',encoding="utf-8") as f:
                     self.polygons = json.load(f)
+                # with open(resource_path('camera_polygons.json'), 'r') as f:
+                #     self.polygons = json.load(f)
                 logger.info("Polygons loaded successfully")
             else:
+                logger.info(resource_path('camera_polygons.json'))
                 self.polygons = {}
                 logger.info("No saved polygons found")
         except Exception as e:
-            logger.error(f"Error loading polygons: {e}")
+            logger.exception(f"Error loading polygons: {e}")
             self.polygons = {}
             QMessageBox.warning(self, "Warning", f"Failed to load saved polygons: {str(e)}")
     
@@ -1039,6 +1124,11 @@ class VideoDisplay(QWidget):
         """Handle widget close event"""
         self.cleanup_capture()
         self.cleanup_thread()
+        path=user_config_path('dev_mode.json')
+        tmp=path.with_suffix(".json.tmp")
+        with tmp.open('w',encoding="utf-8") as f:
+            json.dump(self.dev_mode, f, ensure_ascii=False,indent=2)
+        tmp.replace(path)
         logger.info("VideoDisplay widget closed")
         super().closeEvent(event)
     
@@ -1100,7 +1190,7 @@ class VideoDisplay(QWidget):
                 self.update_nav_buttons()
                 self.update_camera_info()
             else:
-                logger.warning("No camera URL available")
+                logger.info("No camera URL available")
     def stop_video(self):
         """Stop video stream"""
         logger.info("Stopping video stream")
@@ -1110,3 +1200,6 @@ class VideoDisplay(QWidget):
         self.update_status("Video stopped")
         self.current_url = None
         self.update_nav_buttons()
+    def set_developer_mode(self,enabled):
+        self.developer_mode=enabled
+        self.dev_mode["dev_mode"]=int(enabled)
